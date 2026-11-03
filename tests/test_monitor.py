@@ -6,12 +6,51 @@ from unittest.mock import Mock, patch
 
 from gacha_alert.monitor import (MonitorError, PRODUCT_URL, Snapshot, check_once,
                                 parse_page, parse_stores, product_code_from_page,
-                                fetch_stores, send_discord)
+                                fetch_stores, send_discord, load_targets, targets_key, TARGETS, main)
 
 FIXTURE = (Path(__file__).parent / "fixtures/example.html").read_text()
 MATCHING_STORES = {"status": True, "gplus_data": [
     {"shop_title": "ガチャガチャの森　荻窪店"}, {"shop_title": "歌舞伎町タワー namco TOKYO"}]}
 EMPTY_STORES = {"status": True, "gplus_data": []}
+
+
+class TargetConfigurationTests(unittest.TestCase):
+    def test_unset_variable_keeps_existing_shops_and_empty_array_disables(self):
+        for value in [None, "", " \n"]:
+            self.assertEqual(load_targets(value), TARGETS)
+        self.assertEqual(load_targets("[]"), {})
+        self.assertEqual(parse_stores(MATCHING_STORES, {}), ((), 2))
+
+    def test_custom_list_replaces_defaults_and_matches_normalized_names(self):
+        targets = load_targets('["カプセルラボ 土岐店", "ＮＡＭＣＯ ｔｏｋｙｏ"]')
+        payload = {"status": True, "gplus_data": MATCHING_STORES["gplus_data"] + [
+            {"shop_title": "カプセルラボ土岐店"}, {"shop_title": "カプセルラボ別店舗"}]}
+        self.assertEqual(parse_stores(payload, targets), (("カプセルラボ 土岐店", "ＮＡＭＣＯ ｔｏｋｙｏ"), 4))
+
+    def test_duplicate_and_reordered_patterns_share_identity(self):
+        first = load_targets('["NAMCO TOKYO", "店舗A", "namcoＴＯＫＹＯ"]')
+        second = load_targets('["店舗A", "namcoTOKYO"]')
+        self.assertEqual(len(first), 2)
+        self.assertEqual(targets_key(first), targets_key(second))
+
+    def test_invalid_configuration_fails_without_echoing_its_value(self):
+        for raw in ['not-json', '{}', 'null', '"店舗A"', '[null]', '[1]', '[" "]',
+                    '["店\\n舗"]', json.dumps(["店"] * 26), json.dumps(["店" * 121])]:
+            with self.subTest(raw=raw), self.assertRaises(MonitorError):
+                load_targets(raw)
+
+    @patch("gacha_alert.monitor.check_once")
+    def test_cli_passes_environment_variable_to_monitor(self, check):
+        check.return_value = {}
+        with patch.dict("os.environ", {"TARGET_SHOPS": '["追加店舗"]'}), patch("sys.argv", ["monitor", "--dry-run"]):
+            self.assertEqual(main(), 0)
+        self.assertEqual(check.call_args.kwargs["targets"], {"追加店舗": ("追加店舗",)})
+
+    @patch("gacha_alert.monitor.check_once")
+    def test_cli_rejects_invalid_config_before_fetching(self, check):
+        with patch.dict("os.environ", {"TARGET_SHOPS": '{invalid'}), patch("sys.argv", ["monitor", "--dry-run"]):
+            self.assertEqual(main(), 1)
+        check.assert_not_called()
 
 
 def page(text):
@@ -147,6 +186,45 @@ class MonitoringTests(unittest.TestCase):
         with self.assertRaises(MonitorError):
             self.check(stores={"status": False})
         self.assertEqual(self.state.read_bytes(), old)
+
+    def test_added_target_is_evaluated_even_without_timestamp_change(self):
+        self.check(stores=EMPTY_STORES)
+        targets = load_targets('["新しい店舗"]')
+        stores = {"status": True, "gplus_data": [{"shop_title": "新しい店舗"}]}
+        result = self.check(targets=targets, stores=stores)
+        self.assertFalse(result["changed"])
+        self.assertTrue(result["targets_changed"])
+        self.assertEqual(result["notification"], "sent")
+        self.assertEqual(self.check(targets=targets, stores=stores)["notification"], "not_needed")
+        self.assertEqual(self.notify.call_count, 1)
+
+    def test_config_change_dry_run_and_notification_failure_preserve_state(self):
+        self.check(stores=EMPTY_STORES)
+        old = self.state.read_bytes()
+        targets = load_targets('["namcoTOKYO"]')
+        self.assertEqual(self.check(targets=targets, dry_run=True)["notification"], "would_send")
+        self.assertEqual(self.state.read_bytes(), old)
+        self.notify.side_effect = MonitorError("offline")
+        with self.assertRaises(MonitorError):
+            self.check(targets=targets)
+        self.assertEqual(self.state.read_bytes(), old)
+        self.notify.side_effect = None
+        self.assertEqual(self.check(targets=targets)["notification"], "sent")
+
+    def test_empty_targets_never_notify_and_restoring_custom_list_deduplicates(self):
+        targets = load_targets('["namcoTOKYO"]')
+        self.check(targets=targets)
+        self.assertEqual(self.check(targets={})["notification"], "not_needed")
+        self.assertEqual(self.check(targets=targets)["notification"], "not_needed")
+        self.assertEqual(self.notify.call_count, 1)
+
+    def test_legacy_state_preserves_original_deduplication(self):
+        self.check()
+        legacy = json.loads(self.state.read_text())
+        legacy.pop("targets_key")
+        self.state.write_text(json.dumps(legacy))
+        self.assertEqual(self.check()["notification"], "not_needed")
+        self.assertEqual(self.notify.call_count, 1)
 
     def test_page_changes_during_api_request_does_not_save_or_notify(self):
         with self.assertRaises(MonitorError):

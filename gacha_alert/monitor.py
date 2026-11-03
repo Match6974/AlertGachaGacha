@@ -72,6 +72,34 @@ def normalize(value: str) -> str:
     return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value)).casefold()
 
 
+def load_targets(raw: str | None) -> dict[str, tuple[str, ...]]:
+    """An unset/empty Actions variable preserves the original two shops."""
+    if raw is None or not raw.strip():
+        return TARGETS
+    try:
+        names = json.loads(raw)
+    except ValueError:
+        raise MonitorError('TARGET_SHOPS は JSON 配列で指定してください（例: ["店舗A", "店舗B"]）。') from None
+    if (not isinstance(names, list) or len(names) > 25
+            or any(not isinstance(name, str) or not normalize(name) or len(name) > 120
+                   or any(unicodedata.category(c).startswith("C") for c in name) for name in names)):
+        raise MonitorError("TARGET_SHOPS は空白でない店舗名の配列にしてください（最大25件、各120文字）。[] は対象店舗なしです。")
+    targets = {}
+    seen = set()
+    for name in names:
+        key = normalize(name)
+        if key not in seen:
+            targets[name.strip()] = (name.strip(),)
+            seen.add(key)
+    return targets
+
+
+def targets_key(targets: dict[str, tuple[str, ...]]) -> str:
+    # Display order, case and whitespace must not cause duplicate notifications.
+    patterns = sorted({normalize(alias) for aliases in targets.values() for alias in aliases})
+    return hashlib.sha256(json.dumps(patterns, ensure_ascii=False).encode()).hexdigest()
+
+
 @dataclass(frozen=True)
 class Snapshot:
     updated_at: str
@@ -120,7 +148,9 @@ def product_code_from_page(html: str, url: str) -> str:
     return code
 
 
-def parse_stores(payload: object) -> tuple[tuple[str, ...], int]:
+def parse_stores(payload: object, targets: dict[str, tuple[str, ...]] | None = None) -> tuple[tuple[str, ...], int]:
+    if targets is None:
+        targets = TARGETS
     if not isinstance(payload, dict) or payload.get("status") is not True:
         raise MonitorError("店舗検索 API が成功を返しませんでした。次回再試行します。")
     rows = payload.get("gplus_data")
@@ -130,7 +160,7 @@ def parse_stores(payload: object) -> tuple[tuple[str, ...], int]:
         raise MonitorError("店舗検索 API のデータ形式が変わりました。状態は更新しません。")
     names = [normalize(row["shop_title"]) for row in rows]
     # Compare individual titles; unrelated fields and adjacent stores cannot match.
-    shops = tuple(name for name, aliases in TARGETS.items()
+    shops = tuple(name for name, aliases in targets.items()
                   if any(normalize(alias) in title for title in names for alias in aliases))
     return shops, len(rows)
 
@@ -253,23 +283,33 @@ def write_state(path: Path, state: dict) -> None:
 
 def check_once(state_path: Path, webhook: str | None, *, url: str = PRODUCT_URL,
                dry_run: bool = False, fetch: Callable = fetch_page, notify: Callable = send_discord,
-               fetch_shop_data: Callable = fetch_stores) -> dict:
+               fetch_shop_data: Callable = fetch_stores, targets: dict[str, tuple[str, ...]] | None = None) -> dict:
+    if targets is None:
+        targets = TARGETS
+    key = targets_key(targets)
+    default_key = targets_key(TARGETS)
     state = read_state(state_path, url)
     html = fetch(url)
     page = parse_page(html)
     product_code = product_code_from_page(html, url)
-    shops, store_count = parse_stores(fetch_shop_data(product_code))
+    shops, store_count = parse_stores(fetch_shop_data(product_code), targets)
     # Avoid saving a mixed snapshot if the page refreshes during the API request.
     after_html = fetch(url)
     if (parse_page(after_html).updated_at != page.updated_at
             or product_code_from_page(after_html, url) != product_code):
         raise MonitorError("取得中に商品ページが更新されました。状態を保持し、次回再試行します。")
     snapshot = Snapshot(page.updated_at, shops)
-    event_id = hashlib.sha256((url + "\n" + snapshot.updated_at).encode()).hexdigest()
+    identity = url + "\n" + snapshot.updated_at
+    # Preserve existing notification IDs for the original configuration.
+    if key != default_key:
+        identity += "\n" + key
+    event_id = hashlib.sha256(identity.encode()).hexdigest()
     changed = state["updated_at"] != snapshot.updated_at
-    should_notify = bool(changed and snapshot.shops and event_id not in state["notified"])
+    targets_changed = state.get("targets_key", default_key) != key
+    should_notify = bool((changed or targets_changed) and snapshot.shops and event_id not in state["notified"])
     result = {"updated_at": snapshot.updated_at, "shops": list(snapshot.shops), "store_count": store_count,
-              "changed": changed, "notification": "not_needed"}
+              "changed": changed, "targets_changed": targets_changed,
+              "target_shops": list(targets), "notification": "not_needed"}
     if dry_run:
         result["notification"] = "would_send" if should_notify else "not_needed"
         return result
@@ -281,6 +321,7 @@ def check_once(state_path: Path, webhook: str | None, *, url: str = PRODUCT_URL,
         result["notification"] = "sent"
     state["updated_at"] = snapshot.updated_at
     state["shops"] = list(snapshot.shops)
+    state["targets_key"] = key
     write_state(state_path, state)
     return result
 
@@ -300,7 +341,8 @@ def main() -> int:
             send_discord(webhook, Snapshot("", ()), PRODUCT_URL, test_only=True)
             print("Discord のテスト通知を送信しました。iPhone で着信を確認してください。")
             return 0
-        result = check_once(args.state, os.environ.get("DISCORD_WEBHOOK_URL"), dry_run=args.dry_run)
+        targets = load_targets(os.environ.get("TARGET_SHOPS"))
+        result = check_once(args.state, os.environ.get("DISCORD_WEBHOOK_URL"), dry_run=args.dry_run, targets=targets)
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except (MonitorError, OSError) as error:
