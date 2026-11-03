@@ -1,0 +1,40 @@
+name: Gashapon monitor
+
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '取得・判定だけを実行（通知と状態保存を行わない）'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write # Only the separate gacha-monitor-state branch is written.
+
+concurrency:
+  group: gashapon-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    # Enable scheduling only after the real page has been verified with dry_run.
+    if: github.event_name == 'workflow_dispatch' || vars.MONITOR_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Load durable notification state
+        run: python3 scripts/state_branch.py load
+      - name: Check page without sending
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        run: python3 -m gacha_alert.monitor --dry-run
+      - name: Check page and notify Discord
+        if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python3 -m gacha_alert.monitor
+      - name: Persist successful result
+        if: success() && (github.event_name != 'workflow_dispatch' || !inputs.dry_run)
+        run: python3 scripts/state_branch.py save
