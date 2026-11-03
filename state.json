@@ -1,13 +1,15 @@
 {
   "version": 1,
   "url": "https://gashapon.jp/products/detail.php?jan_code=4582770069150000",
-  "updated_at": "2026-11-04T05:00:00+09:00",
+  "updated_at": "2026-11-04T08:00:00+09:00",
   "notified": [
     "5d3160875b80217d4e6c5eccd635d06c47806150e5595c45487bfff54d0773ea",
-    "5154fc6c2abe388d0d26d46ed6a9deb511ce9b1ae6e57e51c0db13e12127c9f5"
+    "5154fc6c2abe388d0d26d46ed6a9deb511ce9b1ae6e57e51c0db13e12127c9f5",
+    "1ddbae2b9a137c0df657643503b42bcacb140469f4a9ef4c9d0e8794f979964c"
   ],
   "shops": [
-    "ワンダーシティ南"
+    "ワンダーシティ南",
+    "店熱海"
   ],
-  "targets_key": "8ea742d6c9641aa2829171de4581aaeca905ad02b8c6d6489af749749921624d"
+  "targets_key": "da5c7bf679084778ae4938874c01371bfb28c11993d314714d5a6f62659a19bc"
 }
