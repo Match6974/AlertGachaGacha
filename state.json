@@ -2,6 +2,11 @@
   "version": 1,
   "url": "https://gashapon.jp/products/detail.php?jan_code=4582770069150000",
   "updated_at": "2026-11-04T05:00:00+09:00",
-  "notified": [],
-  "shops": []
+  "notified": [
+    "5d3160875b80217d4e6c5eccd635d06c47806150e5595c45487bfff54d0773ea"
+  ],
+  "shops": [
+    "ガシャポンのデパートワンダーシティ南熊本店"
+  ],
+  "targets_key": "145a66a64895b0a0ebf16d407b2419e68933eaadfd29b72da2dc836d163fabe4"
 }
