@@ -1,1 +1,69 @@
 # AlertGachaGacha
+
+指定のガシャポン商品ページの更新日時を確認し、対象店舗が掲載されていれば Discord に通知する個人用モニターです。監視は GitHub Actions で行い、iPhone の Discord アプリで受け取ります。iPhone 上でプログラムを動かし続ける必要はありません。
+
+実ページに対応しました。商品ページの「お店」セクションから最終更新日時と商品コードを取得し、ページ自身が使用する店舗検索 API から掲載店舗を取得します。2026年11月4日（日本時間）の実ページ dry-run では、最終更新日時 `2026-11-04T04:00:00+09:00`、掲載店舗13件、対象店舗0件を確認しました。Discord 通知や GitHub 上での定期実行はまだ開始していません。
+
+## 監視条件
+
+- 商品ページ: https://gashapon.jp/products/detail.php?jan_code=4582770069150000
+- 対象店舗: ガチャガチャの森 荻窪店／歌舞伎町タワー namco TOKYO
+- 15 分ごとに確認。前回と更新日時が変わり、いずれかの店舗名があれば通知します。
+- 初回でも対象店舗があれば 1 回通知します。両方あれば 1 通にまとめます。
+- 同じ更新日時には再通知しません。店舗だけが変わっても更新日時が同じなら通知しません。
+- 店舗名のスペース、全角半角、英字の大小の違いを吸収します。namco TOKYO は固有の名称として、その文字列だけでも一致とします。
+- 取得・通知の失敗時は状態を進めず、次回再試行します。更新日時を読めない場合はエラーにし、「対象店舗なし」とは扱いません。
+- 店舗 API の失敗や応答形式の変化もエラーとして扱います。商品コードを照合し、API 取得前後にページの更新日時が変化した場合は状態を保持して再試行します。
+
+通知は掲載の検知です。在庫や販売開始を保証するものではありません。チェックの間に掲載されて消えた情報は検知できません。
+
+## iPhone で使う準備
+
+1. iPhone に Discord をインストールし、通知を許可します。
+2. 自分の Discord サーバーに通知用チャンネルを作ります。管理権限のあるアカウントで、チャンネルの「連携サービス → ウェブフック」から Webhook を作成し、URL をコピーします。アプリに項目がなければデスクトップ版 Discord を使用してください。
+3. このコードを GitHub の `main` ブランチに保存します。今回のファイル作成だけでは GitHub への push や監視開始は行われません。
+4. GitHub の **Settings → Secrets and variables → Actions → New repository secret** に、名前 `DISCORD_WEBHOOK_URL` と Webhook URL を登録します。URL はコード・Issue・チャットに貼らないでください。
+5. **Actions → Test Discord notification → Run workflow** を実行し、iPhone に「テスト通知」が届くことを確認します。掲載店舗の有無に関係なく1通送ります。監視の履歴は変更しません。
+6. **Actions → Gashapon monitor → Run workflow** を開き、最初は `dry_run` をオンのまま実行します。ログの `updated_at`、`store_count`（掲載店舗数）、`shops`（該当した対象店舗）が実ページと一致することを確認します。その後 `dry_run` をオフにして手動実行します。対象店舗が未掲載なら通知は送られません。
+7. **Settings → Secrets and variables → Actions → Variables** に `MONITOR_ENABLED` を値 `true` で登録すると、定期実行が有効になります。停止するときは `false` に変更します。手動実行はこの変数が未設定でも可能です。
+8. Discord の通知チャンネルをミュートせず、通知設定を確認してください。iPhone の集中モードでも通知が抑制される場合があります。
+
+GitHub の定期実行はデフォルトブランチの workflow が対象です。混雑時などに遅延・スキップされる場合があり、15 分以内の通知を保証しません。公開リポジトリでは一定期間（通常 60 日）リポジトリ操作がないと定期実行が無効化されます。非公開リポジトリでは Actions の利用枠・料金も確認してください。
+
+### 通知履歴の保存
+
+履歴は専用の `gacha-monitor-state` ブランチの `state.json` に保存します。実行環境が破棄されても履歴が残り、ソースのブランチは変更しません。状態が変わらなければコミットも作りません。
+
+workflow には `contents: write` 権限が必要です。組織のポリシーやブランチ保護で状態ブランチへの書き込みが禁止されている場合、履歴を保存できません。Actions の実行結果を確認してください。状態ブランチを削除すると履歴も失われます。
+
+Discord 送信後、状態保存前にジョブが異常終了した場合は、次回に同じ通知が届く可能性があります。Discord 送信と Git の保存は一つのトランザクションにできないため、「必ず一度だけ」の配送は保証しません。
+
+## ローカルでの開発・確認
+
+Python 3.11 以上と Git を使います。外部 Python パッケージは不要です。
+
+```sh
+cd /workspace/AlertGachaGacha
+python3 -m unittest discover -s tests -v
+python3 -m gacha_alert.monitor --dry-run
+```
+
+`--dry-run` は実ページの取得・判定だけを実行します。Discord 通知や状態保存はしません。通常実行は `DISCORD_WEBHOOK_URL` 環境変数が必要です。値をシェル履歴に直接書かず、安全な環境変数設定手段を使ってください。
+
+```sh
+python3 -m gacha_alert.monitor
+```
+
+状態ファイルの既定値は `.local/state.json` です。`--state` で変更できます。通常実行を複数プロセスで同時に行わないでください。GitHub Actions では concurrency を設定しています。
+
+## 実装と検証状況
+
+- `gacha_alert/monitor.py`: HTTPS 取得、商品ページの更新日時・商品コードと店舗検索 API の解析、差分判定、Discord 通知、状態保存。
+- `scripts/state_branch.py`: 専用ブランチへの状態保存・復元。
+- `.github/workflows/monitor.yml`: 定期実行と手動 dry-run。
+- `.github/workflows/test-notification.yml`: 手動操作によるテスト通知。
+- `tests/`: 実ページ・API の抜粋と人工サンプルによる判定、重複抑止、失敗時の状態保持、通知リクエスト、実 Git リポジトリでの保存・復元を検証。テストから外部への通知は送りません。
+
+取得元は `https://gashapon.jp/products/detail.php?jan_code=4582770069150000` と、同じページが呼ぶ `https://gashapon.jp/shop/leaflet/getShopProducts.php`（POST）です。店舗検索にはページの「一覧で見る」のリンクから得た13桁の商品コードを使います。API は公開された安定仕様ではないため、今後の変更時には調整が必要です。
+
+未検証: GitHub 上での定期実行、実 Webhook から iPhone への着信。GitHub へのコード保存と上記の運用設定が済むまでは、監視稼働済みとは扱わないでください。
