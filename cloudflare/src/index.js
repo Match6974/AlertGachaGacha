@@ -52,7 +52,8 @@ export async function dispatchWorkflow(env, { fetchImpl = fetch, logger = consol
     try {
       response = await fetchImpl(DISPATCH_URL, {
         method: "POST",
-        redirect: "error",
+        // Workers supports follow/manual; never forward the PAT to a redirect.
+        redirect: "manual",
         headers: {
           Accept: "application/vnd.github+json",
           Authorization: `Bearer ${token}`,
