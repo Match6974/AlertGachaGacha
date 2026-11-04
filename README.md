@@ -1,6 +1,6 @@
 # AlertGachaGacha
 
-指定のガシャポン商品ページの更新日時を確認し、対象店舗が掲載されていれば Discord に通知する個人用モニターです。監視は GitHub Actions で行い、iPhone の Discord アプリで受け取ります。iPhone 上でプログラムを動かし続ける必要はありません。
+指定のガシャポン商品ページの更新日時を確認し、対象店舗が掲載されていれば Discord に通知する個人用モニターです。Cloudflare Workers の Cron から GitHub Actions を起動し、iPhone の Discord アプリで受け取ります。iPhone 上でプログラムを動かし続ける必要はありません。定期起動の設定は [Cloudflare 導入手順](cloudflare/README.md) を参照してください。
 
 実ページに対応しました。商品ページの「お店」セクションから最終更新日時と商品コードを取得し、ページ自身が使用する店舗検索 API から掲載店舗を取得します。2026年11月4日（日本時間）の実ページ dry-run では、最終更新日時 `2026-11-04T04:00:00+09:00`、掲載店舗13件、対象店舗0件を確認しました。Discord 通知や GitHub 上での定期実行はまだ開始していません。
 
@@ -25,10 +25,10 @@
 4. GitHub の **Settings → Secrets and variables → Actions → New repository secret** に、名前 `DISCORD_WEBHOOK_URL` と Webhook URL を登録します。URL はコード・Issue・チャットに貼らないでください。
 5. **Actions → Test Discord notification → Run workflow** を実行し、iPhone に「テスト通知」が届くことを確認します。掲載店舗の有無に関係なく1通送ります。監視の履歴は変更しません。
 6. **Actions → Gashapon monitor → Run workflow** を開き、最初は `dry_run` をオンのまま実行します。ログの `updated_at`、`store_count`（掲載店舗数）、`shops`（該当した対象店舗）が実ページと一致することを確認します。その後 `dry_run` をオフにして手動実行します。対象店舗が未掲載なら通知は送られません。
-7. **Settings → Secrets and variables → Actions → Variables** に `MONITOR_ENABLED` を値 `true` で登録すると、定期実行が有効になります。停止するときは `false` に変更します。手動実行はこの変数が未設定でも可能です。
+7. [Cloudflare 導入手順](cloudflare/README.md) に従って Secret と Cron を設定します。停止は Cloudflare の Cron を削除してください。`MONITOR_ENABLED=false` では外部起動を停止できません。
 8. Discord の通知チャンネルをミュートせず、通知設定を確認してください。iPhone の集中モードでも通知が抑制される場合があります。
 
-GitHub の定期実行はデフォルトブランチの workflow が対象です。混雑時などに遅延・スキップされる場合があり、15 分以内の通知を保証しません。公開リポジトリでは一定期間（通常 60 日）リポジトリ操作がないと定期実行が無効化されます。非公開リポジトリでは Actions の利用枠・料金も確認してください。
+GitHub の `schedule` は使わず、Cloudflare から `main` の `workflow_dispatch` を呼び出します。Cloudflare のトリガーや GitHub の実行待ちによる遅延は残るため、15分以内の通知を保証しません。非公開リポジトリでは Actions の利用枠・料金も確認してください。
 
 ## 検索対象店舗の追加・削除
 
@@ -47,7 +47,7 @@ GitHub の定期実行はデフォルトブランチの workflow が対象です
 この例の3店舗が検索対象になります。既定の2店舗への追加ではなく、配列全体で対象店舗を置き換えます。増やすには店舗名を追加し、減らすにはその行を削除します。各店舗名を半角の二重引用符 `"` で囲み、店舗同士を半角カンマで区切ってください。最後の店舗の後ろにはカンマを付けません。
 
 - 未設定・空欄・変数を削除: 従来の2店舗に戻ります。
-- `[]`: 対象店舗を0件にします。商品ページの確認は続きますが、掲載通知は送りません。監視自体の停止には `MONITOR_ENABLED=false` を使います。
+- `[]`: 対象店舗を0件にします。商品ページの確認は続きますが、掲載通知は送りません。監視自体の停止には Cloudflare の Cron を削除します。
 - マッチ方法: 店舗名の部分一致です。スペース・全角半角・英字の大小を無視します。別店舗まで一致しないよう、支店名まで含めることをおすすめします。既定の namco TOKYO の別名も使いたい場合は、カスタム配列に必要な名称を明示してください。
 - 上限: 25件、各120文字。同じ名前の表記違いは重複を除きます。不正な JSON や空白だけの店舗名は実行エラーとし、通知履歴は進めません。
 
@@ -87,7 +87,8 @@ python3 -m gacha_alert.monitor
 
 - `gacha_alert/monitor.py`: HTTPS 取得、商品ページの更新日時・商品コードと店舗検索 API の解析、差分判定、Discord 通知、状態保存。
 - `scripts/state_branch.py`: 専用ブランチへの状態保存・復元。
-- `.github/workflows/monitor.yml`: 定期実行と手動 dry-run。
+- `.github/workflows/monitor.yml`: 外部からの起動と手動 dry-run。
+- `cloudflare/`: 15分ごとの GitHub Actions 起動処理と導入手順。
 - `.github/workflows/test-notification.yml`: 手動操作によるテスト通知。
 - `tests/`: 実ページ・API の抜粋と人工サンプルによる判定、重複抑止、失敗時の状態保持、通知リクエスト、実 Git リポジトリでの保存・復元を検証。テストから外部への通知は送りません。
 
