@@ -25,7 +25,7 @@ test("dispatches the exact workflow and main branch with dry_run false", async (
   assert.equal(url, DISPATCH_URL);
   assert.equal(url, "https://api.github.com/repos/Match6974/AlertGachaGacha/actions/workflows/monitor.yml/dispatches");
   assert.equal(request.method, "POST");
-  assert.equal(request.redirect, "error");
+  assert.equal(request.redirect, "manual");
   assert.equal(request.headers.Authorization, `Bearer ${TOKEN}`);
   assert.equal(request.headers["X-GitHub-Api-Version"], "2022-11-28");
   assert.ok(request.headers["User-Agent"]);
@@ -59,6 +59,24 @@ for (const status of [401, 403, 404, 422, 429, 500]) {
     assert.match(output, /REDACTED/);
     assert.ok(!output.includes(TOKEN));
     assert.ok(!output.includes("github_dispatch_accepted"));
+  });
+}
+
+for (const status of [301, 302, 303, 307, 308]) {
+  test(`HTTP ${status} redirect is rejected without following Location`, async () => {
+    const log = logger();
+    const fetchImpl = mock.fn(async (_url, request) => {
+      assert.equal(request.redirect, "manual");
+      return new Response("Redirect must not be followed", {
+        status, headers: { Location: "https://other.example/dispatch" },
+      });
+    });
+    await assert.rejects(dispatchWorkflow(env, { fetchImpl, logger: log }), new RegExp(`HTTP ${status}`));
+    assert.equal(fetchImpl.mock.callCount(), 1);
+    assert.equal(fetchImpl.mock.calls[0].arguments[0], DISPATCH_URL);
+    assert.match(logged(log), /github_dispatch_rejected/);
+    assert.ok(!logged(log).includes("github_dispatch_accepted"));
+    assert.ok(!logged(log).includes(TOKEN));
   });
 }
 
