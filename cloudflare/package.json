@@ -1,0 +1,19 @@
+{
+  "name": "alertgachagacha-scheduler",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node test/index.test.js",
+    "dev": "wrangler dev --test-scheduled",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "secret:put": "wrangler secret put GITHUB_TOKEN"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
