@@ -9,7 +9,7 @@ on:
         default: true
 
 permissions:
-  contents: write # Only the separate gacha-monitor-state branch is written.
+  contents: write # 書き込み先は監視状態を保存する専用ブランチのみ。
 
 concurrency:
   group: gashapon-monitor
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   check:
-    # Enable scheduling only after the real page has been verified with dry_run.
+    # Cloudflareからの起動もworkflow_dispatchとして扱う。
     if: github.event_name == 'workflow_dispatch' || vars.MONITOR_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5

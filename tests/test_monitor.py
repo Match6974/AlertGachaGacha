@@ -9,6 +9,7 @@ from gacha_alert.monitor import (MonitorError, PRODUCT_URL, Snapshot, check_once
                                 fetch_stores, send_discord, load_targets, targets_key, TARGETS, main)
 
 FIXTURE = (Path(__file__).parent / "fixtures/example.html").read_text()
+NO_LISTING = (Path(__file__).parent / "fixtures/gashapon_no_listing.html").read_text()
 MATCHING_STORES = {"status": True, "gplus_data": [
     {"shop_title": "ガチャガチャの森　荻窪店"}, {"shop_title": "歌舞伎町タワー namco TOKYO"}]}
 EMPTY_STORES = {"status": True, "gplus_data": []}
@@ -62,7 +63,7 @@ class ParsingTests(unittest.TestCase):
     def test_timestamp_and_both_shops_with_spacing_and_fullwidth(self):
         snapshot = parse_page(FIXTURE.replace("09:30", "０９：３０"))
         self.assertEqual(snapshot.updated_at, "2026-11-02T09:30:00+09:00")
-        self.assertEqual(snapshot.shops, ())  # HTML alone cannot establish shop presence.
+        self.assertEqual(snapshot.shops, ())  # HTML本文だけで店舗の掲載を判定しない。
         self.assertEqual(len(parse_stores(MATCHING_STORES)[0]), 2)
 
     def test_no_target_is_valid(self):
@@ -109,6 +110,28 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(parse_page(html).updated_at, "2026-11-04T04:00:00+09:00")
         self.assertEqual(product_code_from_page(html, PRODUCT_URL), "4582770069150")
         self.assertEqual(parse_stores(data), ((), 13))
+
+    def test_confirmed_product_without_shop_section_has_no_listing(self):
+        self.assertEqual(parse_page(NO_LISTING), Snapshot(None, (), False))
+
+    def test_missing_map_without_product_evidence_is_still_an_error(self):
+        for html in ["", "<h1>メンテナンス中</h1>",
+                     NO_LISTING.replace('data-shop="0"', 'data-shop="1"'),
+                     NO_LISTING.replace('data-shop="0"', ''),
+                     NO_LISTING.replace("4582770069150000", "0000000000000000"),
+                     NO_LISTING.replace('pg-detail__data', 'unknown'),
+                     NO_LISTING.replace('pg-heading', 'unknown'),
+                     NO_LISTING.replace('property="og:url"', 'property="unknown"'),
+                     NO_LISTING.split('</section>')[0],
+                     NO_LISTING.replace('新フィギュアシリーズ！', '現在メンテナンス中です。')]:
+            with self.subTest(html=html[:100]), self.assertRaises(MonitorError):
+                parse_page(html)
+
+    def test_conflicting_shop_flags_are_not_treated_as_no_listing(self):
+        for html in [NO_LISTING.replace('</body>', '<section id="shopArea"></section></body>'),
+                     NO_LISTING.replace('</body>', '<section class="pg-wrap" data-shop="1"></section></body>')]:
+            with self.assertRaises(MonitorError):
+                parse_page(html)
 
 
 class MonitoringTests(unittest.TestCase):
@@ -222,6 +245,8 @@ class MonitoringTests(unittest.TestCase):
         self.check()
         legacy = json.loads(self.state.read_text())
         legacy.pop("targets_key")
+        legacy.pop("listing_available")
+        legacy.pop("listing_epoch")
         self.state.write_text(json.dumps(legacy))
         self.assertEqual(self.check()["notification"], "not_needed")
         self.assertEqual(self.notify.call_count, 1)
@@ -232,6 +257,93 @@ class MonitoringTests(unittest.TestCase):
                        fetch_shop_data=lambda _: MATCHING_STORES, notify=self.notify)
         self.assertFalse(self.state.exists())
         self.notify.assert_not_called()
+
+    def test_no_listing_is_successful_without_store_api_or_notification(self):
+        api = Mock(side_effect=AssertionError("非掲載時にAPIを呼んではいけない"))
+        result = check_once(self.state, "secret", fetch=lambda _: NO_LISTING,
+                            fetch_shop_data=api, notify=self.notify)
+        self.assertFalse(result["listing_available"])
+        self.assertIsNone(result["updated_at"])
+        self.assertEqual(result["store_count"], 0)
+        self.assertEqual(result["notification"], "not_needed")
+        api.assert_not_called()
+        self.notify.assert_not_called()
+        self.assertEqual(self.check(NO_LISTING)["notification"], "not_needed")
+
+    def test_disappearance_keeps_history_and_reappearance_notifies_once(self):
+        self.check()
+        old_history = json.loads(self.state.read_text())["notified"]
+        self.check(NO_LISTING)
+        absent = self.state.read_bytes()
+        self.assertEqual(json.loads(absent)["notified"], old_history)
+        self.check(NO_LISTING)
+        self.assertEqual(self.state.read_bytes(), absent)
+        # 更新日時が前回と同じでも、掲載なしを挟んだ復帰時は再判定する。
+        self.assertEqual(self.check()["notification"], "sent")
+        self.assertEqual(self.check()["notification"], "not_needed")
+        self.assertEqual(self.notify.call_count, 2)
+        self.assertEqual(json.loads(self.state.read_text())["listing_epoch"], 1)
+
+    def test_initial_absence_then_listing_and_multiple_restock_cycles(self):
+        self.check(NO_LISTING)
+        self.assertEqual(self.check()["notification"], "sent")
+        self.check(NO_LISTING)
+        self.assertEqual(self.check()["notification"], "sent")
+        self.assertEqual(self.notify.call_count, 2)
+        self.assertEqual(json.loads(self.state.read_text())["listing_epoch"], 2)
+
+    def test_reappearance_without_target_does_not_notify(self):
+        self.check(NO_LISTING)
+        result = self.check(stores=EMPTY_STORES)
+        self.assertTrue(result["listing_available"])
+        self.assertEqual(result["notification"], "not_needed")
+        self.notify.assert_not_called()
+
+    def test_reappearance_notification_failure_keeps_absent_state_for_retry(self):
+        self.check(NO_LISTING)
+        old = self.state.read_bytes()
+        self.notify.side_effect = MonitorError("模擬的な送信失敗")
+        with self.assertRaises(MonitorError):
+            self.check()
+        self.assertEqual(self.state.read_bytes(), old)
+        self.notify.side_effect = None
+        self.assertEqual(self.check()["notification"], "sent")
+        self.assertEqual(self.check()["notification"], "not_needed")
+
+    def test_no_listing_dry_run_does_not_create_or_modify_state(self):
+        self.check(NO_LISTING, dry_run=True)
+        self.assertFalse(self.state.exists())
+        self.check()
+        old = self.state.read_bytes()
+        self.check(NO_LISTING, dry_run=True)
+        self.assertEqual(self.state.read_bytes(), old)
+
+    def test_listing_transition_during_fetch_preserves_state(self):
+        for before, after in [(FIXTURE, NO_LISTING), (NO_LISTING, FIXTURE)]:
+            self.check(NO_LISTING)
+            old = self.state.read_bytes()
+            with self.assertRaises(MonitorError):
+                check_once(self.state, "secret", fetch=Mock(side_effect=[before, after]),
+                           fetch_shop_data=lambda _: MATCHING_STORES, notify=self.notify)
+            self.assertEqual(self.state.read_bytes(), old)
+        self.notify.assert_not_called()
+
+    def test_parse_failure_during_absence_keeps_state_and_future_recovery(self):
+        self.check(NO_LISTING)
+        old = self.state.read_bytes()
+        with self.assertRaises(MonitorError):
+            self.check("<h1>メンテナンス中</h1>")
+        self.assertEqual(self.state.read_bytes(), old)
+        self.assertEqual(self.check()["notification"], "sent")
+
+    def test_invalid_listing_state_is_rejected(self):
+        self.check(NO_LISTING)
+        state = json.loads(self.state.read_text())
+        for change in [{"listing_available": "false"}, {"listing_epoch": -1},
+                       {"listing_epoch": True}, {"listing_available": True}]:
+            self.state.write_text(json.dumps(state | change))
+            with self.assertRaises(MonitorError):
+                self.check()
 
 
 class StoreRequestTests(unittest.TestCase):

@@ -28,7 +28,7 @@ UPDATED = re.compile(r"(?:最終\s*更新(?:\s*日時|\s*日)?|更新\s*日時|�
 
 
 class MonitorError(Exception):
-    """An actionable failure, safe to display without revealing credentials."""
+    """認証情報を含まず、そのまま画面に表示できる監視エラー。"""
 
 
 class VisibleText(HTMLParser):
@@ -73,7 +73,7 @@ def normalize(value: str) -> str:
 
 
 def load_targets(raw: str | None) -> dict[str, tuple[str, ...]]:
-    """An unset/empty Actions variable preserves the original two shops."""
+    """Actions変数が未設定・空欄の場合は従来の2店舗を維持する。"""
     if raw is None or not raw.strip():
         return TARGETS
     try:
@@ -95,19 +95,68 @@ def load_targets(raw: str | None) -> dict[str, tuple[str, ...]]:
 
 
 def targets_key(targets: dict[str, tuple[str, ...]]) -> str:
-    # Display order, case and whitespace must not cause duplicate notifications.
+    # 並び順・大小文字・空白だけの変更では重複通知しない。
     patterns = sorted({normalize(alias) for aliases in targets.values() for alias in aliases})
     return hashlib.sha256(json.dumps(patterns, ensure_ascii=False).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
 class Snapshot:
-    updated_at: str
+    updated_at: str | None
     shops: tuple[str, ...]
+    listing_available: bool = True
 
 
-def parse_page(html: str) -> Snapshot:
-    # Only the machine/shop section carries the timestamp we monitor.
+class ProductPageMarkers(HTMLParser):
+    """店舗欄の欠落と、正常な商品ページの「掲載なし」を区別する。"""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.shop_flags: set[str | None] = set()
+        self.product_urls: set[str] = set()
+        self.has_shop_area = False
+        self.has_product_heading = False
+        self.has_product_details = False
+        self.has_document_end = False
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        classes = (attrs.get("class") or "").split()
+        if tag == "section" and "pg-wrap" in classes:
+            self.shop_flags.add(attrs.get("data-shop"))
+        if tag == "meta" and attrs.get("property") == "og:url":
+            self.product_urls.add(attrs.get("content") or "")
+        if attrs.get("id") == "shopArea":
+            self.has_shop_area = True
+        if tag == "h1" and "pg-heading" in classes:
+            self.has_product_heading = True
+        if "pg-detail__data" in classes:
+            self.has_product_details = True
+
+    def handle_endtag(self, tag):
+        if tag == "html":
+            self.has_document_end = True
+
+    def confirms_no_listing(self, url: str) -> bool:
+        # 欄がないだけでは正常扱いしない。商品識別と明示的な非掲載フラグが必要。
+        return (self.shop_flags == {"0"} and not self.has_shop_area
+                and self.product_urls == {url} and self.has_product_heading
+                and self.has_product_details and self.has_document_end)
+
+
+def parse_page(html: str, url: str = PRODUCT_URL) -> Snapshot:
+    markers = ProductPageMarkers()
+    markers.feed(html)
+    if markers.confirms_no_listing(url):
+        visible = VisibleText()
+        visible.feed(html)
+        if "メンテナンス中" in "".join(visible.parts):
+            raise MonitorError("商品ページはメンテナンス中です。状態を保持し、次回再試行します。")
+        # 非掲載時に更新日時を捏造せず、店舗APIにも問い合わせない。
+        return Snapshot(None, (), False)
+    if "0" in markers.shop_flags:
+        raise MonitorError("商品ページの店舗掲載状態を確認できません。状態は更新しません。")
+    # 監視対象は「この商品が売っているお店」欄の最終更新日時だけ。
     parser = VisibleText("shopArea")
     parser.feed(html)
     text = unicodedata.normalize("NFKC", "".join(parser.parts))
@@ -125,7 +174,7 @@ def parse_page(html: str) -> Snapshot:
         raise MonitorError("HTML から更新日時を取得できません。JavaScript・別 API・iframe による表示、またはページ構造の変更を確認してください。")
     if len(dates) != 1:
         raise MonitorError("異なる更新日時が複数見つかりました。監視対象の日時を特定する必要があります。")
-    # Shop names are loaded through a separate API, never from page text.
+    # 店舗名は本文から推測せず、別の店舗検索APIで取得する。
     return Snapshot(dates.pop(), ())
 
 
@@ -159,7 +208,7 @@ def parse_stores(payload: object, targets: dict[str, tuple[str, ...]] | None = N
             or not row["shop_title"].strip() for row in rows):
         raise MonitorError("店舗検索 API のデータ形式が変わりました。状態は更新しません。")
     names = [normalize(row["shop_title"]) for row in rows]
-    # Compare individual titles; unrelated fields and adjacent stores cannot match.
+    # 店舗名ごとに照合し、住所などの別項目や隣の店舗との連結で誤検知しない。
     shops = tuple(name for name, aliases in targets.items()
                   if any(normalize(alias) in title for title in names for alias in aliases))
     return shops, len(rows)
@@ -168,7 +217,7 @@ def parse_stores(payload: object, targets: dict[str, tuple[str, ...]] | None = N
 def fetch_stores(product_code: str) -> object:
     if not re.fullmatch(r"\d{13}", product_code):
         raise MonitorError("店舗検索の商品コードが不正です。")
-    # Same parameters as the product page without geolocation permission.
+    # 位置情報を許可しなかった場合の商品ページと同じ検索条件を使う。
     data = urllib.parse.urlencode({
         "pref": "", "free": "", "product_code": product_code, "gplus_type": "gplus",
         "center_lat": "35.728856", "center_lng": "139.720078", "map_distance_flg": "false",
@@ -233,7 +282,7 @@ def send_discord(webhook: str, snapshot: Snapshot, url: str, *, test_only: bool 
                         {"name": "ページの更新日時", "value": snapshot.updated_at},
                         {"name": "注意", "value": "掲載情報の通知です。在庫・販売状況は店舗で確認してください。"}]}],
     }
-    # wait=true returns an acknowledgement rather than merely accepting the request.
+    # wait=trueで受付だけでなく、送信したメッセージの確認結果を取得する。
     request = urllib.request.Request(webhook + "?wait=true", method="POST",
                                      data=json.dumps(payload).encode(),
                                      headers={"Content-Type": "application/json", "User-Agent": "AlertGachaGacha/1.0"})
@@ -251,14 +300,19 @@ def send_discord(webhook: str, snapshot: Snapshot, url: str, *, test_only: bool 
 
 
 def read_state(path: Path, url: str) -> dict:
+    """旧形式も読み込み、非掲載時だけ更新日時のnullを許可する。"""
     if not path.exists():
         return {"version": 1, "url": url, "updated_at": None, "notified": []}
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
         if (not isinstance(state, dict) or state.get("version") != 1 or state.get("url") != url
+                or "updated_at" not in state
                 or not isinstance(state.get("notified"), list)
                 or not all(isinstance(v, str) for v in state["notified"])
-                or not isinstance(state.get("updated_at"), str)):
+                or not isinstance(state.get("listing_available", True), bool)
+                or (not isinstance(state.get("updated_at"), str)
+                    and not (state.get("updated_at") is None and state.get("listing_available") is False))
+                or type(state.get("listing_epoch", 0)) is not int or state.get("listing_epoch", 0) < 0):
             raise ValueError
         return state
     except (ValueError, OSError):
@@ -266,6 +320,7 @@ def read_state(path: Path, url: str) -> dict:
 
 
 def write_state(path: Path, state: dict) -> None:
+    """一時ファイルを置き換え、途中で壊れたJSONを残さないよう保存する。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
@@ -284,23 +339,35 @@ def write_state(path: Path, state: dict) -> None:
 def check_once(state_path: Path, webhook: str | None, *, url: str = PRODUCT_URL,
                dry_run: bool = False, fetch: Callable = fetch_page, notify: Callable = send_discord,
                fetch_shop_data: Callable = fetch_stores, targets: dict[str, tuple[str, ...]] | None = None) -> dict:
+    """掲載状態を確認し、通常更新・店舗設定変更・再掲載時に通知を判定する。"""
     if targets is None:
         targets = TARGETS
     key = targets_key(targets)
     default_key = targets_key(TARGETS)
     state = read_state(state_path, url)
     html = fetch(url)
-    page = parse_page(html)
-    product_code = product_code_from_page(html, url)
-    shops, store_count = parse_stores(fetch_shop_data(product_code), targets)
-    # Avoid saving a mixed snapshot if the page refreshes during the API request.
+    page = parse_page(html, url)
+    product_code = None
+    if page.listing_available:
+        product_code = product_code_from_page(html, url)
+        shops, store_count = parse_stores(fetch_shop_data(product_code), targets)
+    else:
+        shops, store_count = (), 0
+    # 取得中に掲載・非掲載や更新日時が変わった場合は、混在した結果を保存しない。
     after_html = fetch(url)
-    if (parse_page(after_html).updated_at != page.updated_at
-            or product_code_from_page(after_html, url) != product_code):
+    after_page = parse_page(after_html, url)
+    if (after_page != page or (page.listing_available
+                              and product_code_from_page(after_html, url) != product_code)):
         raise MonitorError("取得中に商品ページが更新されました。状態を保持し、次回再試行します。")
-    snapshot = Snapshot(page.updated_at, shops)
-    identity = url + "\n" + snapshot.updated_at
-    # Preserve existing notification IDs for the original configuration.
+    snapshot = Snapshot(page.updated_at, shops, page.listing_available)
+    was_listed = state.get("listing_available", True)
+    listing_changed = was_listed != page.listing_available
+    # 非掲載からの復帰を別の掲載期間にする。同じ日時が復活しても1回は再通知できる。
+    epoch = state.get("listing_epoch", 0) + int(not was_listed and page.listing_available)
+    identity = url + "\n" + (snapshot.updated_at or "not_listed")
+    # 従来の通知IDは維持し、復帰後のみ掲載期間を識別情報に加える。
+    if epoch:
+        identity += "\nlisting_epoch=" + str(epoch)
     if key != default_key:
         identity += "\n" + key
     event_id = hashlib.sha256(identity.encode()).hexdigest()
@@ -308,6 +375,7 @@ def check_once(state_path: Path, webhook: str | None, *, url: str = PRODUCT_URL,
     targets_changed = state.get("targets_key", default_key) != key
     should_notify = bool((changed or targets_changed) and snapshot.shops and event_id not in state["notified"])
     result = {"updated_at": snapshot.updated_at, "shops": list(snapshot.shops), "store_count": store_count,
+              "listing_available": snapshot.listing_available, "listing_changed": listing_changed,
               "changed": changed, "targets_changed": targets_changed,
               "target_shops": list(targets), "notification": "not_needed"}
     if dry_run:
@@ -322,6 +390,8 @@ def check_once(state_path: Path, webhook: str | None, *, url: str = PRODUCT_URL,
     state["updated_at"] = snapshot.updated_at
     state["shops"] = list(snapshot.shops)
     state["targets_key"] = key
+    state["listing_available"] = snapshot.listing_available
+    state["listing_epoch"] = epoch
     write_state(state_path, state)
     return result
 

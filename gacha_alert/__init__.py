@@ -1,1 +1,1 @@
-"""Gashapon page monitoring and Discord notifications."""
+"""ガシャポンの商品ページ監視とDiscordへの掲載通知。"""
