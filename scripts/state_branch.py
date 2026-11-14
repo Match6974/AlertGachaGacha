@@ -1,4 +1,4 @@
-"""Persist monitor state on a separate Git branch without changing the checkout."""
+"""作業ブランチを切り替えず、監視状態を専用のGitブランチへ保存・復元する。"""
 
 import argparse
 import subprocess
@@ -19,7 +19,7 @@ def git(*args, input=None, allowed=(0,)):
 
 def load():
     STATE.parent.mkdir(parents=True, exist_ok=True)
-    # Exit 2 means a successful remote query found no matching branch.
+    # 終了コード2は接続失敗ではなく、対象ブランチが存在しないことを示す。
     found = git("ls-remote", "--exit-code", "--heads", "origin", BRANCH, allowed=(0, 2))
     if found.returncode == 2:
         if STATE.exists():
@@ -47,7 +47,7 @@ def save():
     if parent:
         args.extend(["-p", parent])
     commit = git(*args, input=b"Update gashapon monitor state\n").stdout.decode().strip()
-    # Never force: concurrent changes must fail rather than lose notification history.
+    # 強制プッシュはしない。同時更新があれば失敗させ、通知履歴の上書きを防ぐ。
     git("push", "origin", f"{commit}:{BRANCH}")
     print("Monitor state saved on gacha-monitor-state.")
 

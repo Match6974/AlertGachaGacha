@@ -9,7 +9,7 @@ function redact(value, token) {
   for (const secret of [token, encodeURIComponent(token)]) {
     if (secret) text = text.replaceAll(secret, "[REDACTED]");
   }
-  // Also mask recognizable PATs if an oversized response truncates a token.
+  // 応答のサイズ制限でトークンが途中で切れても、PAT形式の文字列を伏せる。
   return text.replace(/\b(?:github_pat|gh[pousr])_[A-Za-z0-9_]+/g, "[REDACTED]");
 }
 
@@ -52,7 +52,7 @@ export async function dispatchWorkflow(env, { fetchImpl = fetch, logger = consol
     try {
       response = await fetchImpl(DISPATCH_URL, {
         method: "POST",
-        // Workers supports follow/manual; never forward the PAT to a redirect.
+        // Workersで使えるmanualを指定し、転送先にPATを送信しない。
         redirect: "manual",
         headers: {
           Accept: "application/vnd.github+json",
@@ -65,7 +65,7 @@ export async function dispatchWorkflow(env, { fetchImpl = fetch, logger = consol
         signal: controller.signal,
       });
     } catch (error) {
-      // Never log the raw error object: it may contain request headers.
+      // リクエストヘッダーを含む可能性があるため、生のエラーオブジェクトは出力しない。
       logger.error("github_dispatch_transport_error", {
         message: redact(error instanceof Error ? error.message : "Network request failed", token),
         timed_out: controller.signal.aborted,
@@ -105,12 +105,12 @@ export async function dispatchWorkflow(env, { fetchImpl = fetch, logger = consol
 export default {
   async scheduled(controller, env, _ctx) {
     console.log("cron_trigger", { cron: controller.cron, scheduled_time: controller.scheduledTime });
-    // Await so a rejection marks this scheduled invocation as failed.
+    // 処理を待ち、例外が発生したCron実行を失敗として記録する。
     await dispatchWorkflow(env);
   },
 
   fetch() {
-    // HTTP requests can never dispatch a workflow, even with a valid Secret.
+    // 有効なSecretがあっても、HTTPリクエストからはWorkflowを起動しない。
     return new Response("Not Found", { status: 404 });
   },
 };
