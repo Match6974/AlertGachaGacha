@@ -1,7 +1,7 @@
 {
   "version": 1,
   "url": "https://gashapon.jp/products/detail.php?jan_code=4582770069150000",
-  "updated_at": "2026-11-28T03:00:00+09:00",
+  "updated_at": "2026-11-28T04:00:00+09:00",
   "notified": [
     "5d3160875b80217d4e6c5eccd635d06c47806150e5595c45487bfff54d0773ea",
     "5154fc6c2abe388d0d26d46ed6a9deb511ce9b1ae6e57e51c0db13e12127c9f5",
@@ -19,7 +19,8 @@
     "07ce6a7dadde9291fe9d584afddffdce5b7f05c753efefbfa51f4aa80d7c786e",
     "18cc18be88b57399a71e8c3dbe182b707a111ab5da1f20c32c7b4be7e33cbf60",
     "f68a826ebfb3487b53cf0870983de035207f98f64ab257e2308e89665665b60a",
-    "bfa9f8f95e261dfcb1ed2be0acd37d5194d40d527f9b7aaa3cbe7203b9179dd9"
+    "bfa9f8f95e261dfcb1ed2be0acd37d5194d40d527f9b7aaa3cbe7203b9179dd9",
+    "fe218743ee2277063081e93c4a3ba769e42fc24586a02193e3fe1e744d86ee04"
   ],
   "shops": [
     "歌舞伎町タワー"
